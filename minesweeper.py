@@ -398,7 +398,7 @@ class Game:
                     self.hover_btn = i
                     break
 
-        elif event.type == pygame.MOUSEBUTTONDOWN and event.button == 1:
+        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
             mx, my = event.pos
             for i, rect in enumerate(self._menu_btn_rects):
                 if rect.collidepoint(mx, my):
@@ -425,7 +425,7 @@ class Game:
             self.hover_cell = self._cell_at(mx, my)
             self.hover_btn = "menu" if self._menu_game_btn.collidepoint(mx, my) else None
 
-        elif event.type == pygame.MOUSEBUTTONDOWN:
+        elif event.type == pygame.MOUSEBUTTONUP:
             mx, my = event.pos
 
             # Header button
