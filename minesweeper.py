@@ -1,19 +1,9 @@
-"""Minesweeper — Pygame version (Pygbag-compatible for web deployment)."""
+"""Minesweeper — text-based terminal game."""
 
 import random
 import time
-from enum import Enum
-
-import pygame
-
-# ---------------------------------------------------------------------------
-# Game logic (unchanged from curses version)
-# ---------------------------------------------------------------------------
-
-class State(Enum):
-    PLAYING = "playing"
-    WON = "won"
-    LOST = "lost"
+import os
+import sys
 
 
 class Cell:
@@ -30,7 +20,7 @@ class Board:
         self.cols = cols
         self.total_mines = mines
         self.cells = [[Cell() for _ in range(cols)] for _ in range(rows)]
-        self.state = State.PLAYING
+        self.state = "playing"  # playing / won / lost
         self.start_time = None
         self.end_time = None
         self.first_move = True
@@ -59,58 +49,86 @@ class Board:
             for c in range(self.cols):
                 if not self.cells[r][c].mine:
                     self.cells[r][c].adjacent = sum(
-                        1 for nr, nc in self._neighbors(r, c) if self.cells[nr][nc].mine
+                        1 for nr, nc in self._neighbors(r, c)
+                        if self.cells[nr][nc].mine
                     )
 
     def reveal(self, r, c):
+        if not (0 <= r < self.rows and 0 <= c < self.cols):
+            raise ValueError(f"Position ({r},{c}) is out of bounds.")
         if self.first_move:
             self.first_move = False
             self.start_time = time.time()
             self._place_mines(r, c)
-
         cell = self.cells[r][c]
-        if cell.flagged or cell.revealed:
-            return
+        if cell.flagged:
+            raise ValueError("That cell is flagged. Unflag it first with 'u'.")
+        if cell.revealed:
+            raise ValueError("That cell is already revealed.")
         cell.revealed = True
-
         if cell.mine:
-            self.state = State.LOST
+            self.state = "lost"
             self.end_time = time.time()
-            self._reveal_all_mines()
+            self._reveal_all()
             return
-
         if cell.adjacent == 0:
             for nr, nc in self._neighbors(r, c):
-                if not self.cells[nr][nc].revealed and not self.cells[nr][nc].flagged:
+                nb = self.cells[nr][nc]
+                if not nb.revealed and not nb.flagged:
                     self.reveal(nr, nc)
-
         self._check_win()
 
     def chord(self, r, c):
-        """Reveal all unflagged neighbors when adjacent flag count matches."""
+        if not (0 <= r < self.rows and 0 <= c < self.cols):
+            raise ValueError(f"Position ({r},{c}) is out of bounds.")
         cell = self.cells[r][c]
-        if not cell.revealed or cell.adjacent == 0:
-            return
-        flag_count = sum(1 for nr, nc in self._neighbors(r, c) if self.cells[nr][nc].flagged)
-        if flag_count == cell.adjacent:
-            for nr, nc in self._neighbors(r, c):
-                if not self.cells[nr][nc].flagged and not self.cells[nr][nc].revealed:
+        if not cell.revealed:
+            raise ValueError("Cell is not revealed yet.")
+        if cell.adjacent == 0:
+            raise ValueError("No adjacent mines — nothing to chord.")
+        flag_count = sum(
+            1 for nr, nc in self._neighbors(r, c) if self.cells[nr][nc].flagged
+        )
+        if flag_count != cell.adjacent:
+            raise ValueError(
+                f"Need {cell.adjacent} flag(s) around this cell, found {flag_count}."
+            )
+        for nr, nc in self._neighbors(r, c):
+            nb = self.cells[nr][nc]
+            if not nb.flagged and not nb.revealed:
+                nb.revealed = True
+                if nb.mine:
+                    self.state = "lost"
+                    self.end_time = time.time()
+                    self._reveal_all()
+                    return
+                if nb.adjacent == 0:
                     self.reveal(nr, nc)
-                    if self.state != State.PLAYING:
-                        return
+                if self.state != "playing":
+                    return
+        self._check_win()
 
-    def toggle_flag(self, r, c):
+    def flag(self, r, c):
+        if not (0 <= r < self.rows and 0 <= c < self.cols):
+            raise ValueError(f"Position ({r},{c}) is out of bounds.")
         cell = self.cells[r][c]
         if cell.revealed:
-            return
+            raise ValueError("Cell is already revealed.")
         if cell.flagged:
-            cell.flagged = False
-            self.flags -= 1
-        else:
-            cell.flagged = True
-            self.flags += 1
+            raise ValueError("Already flagged. Use 'u' to unflag.")
+        cell.flagged = True
+        self.flags += 1
 
-    def _reveal_all_mines(self):
+    def unflag(self, r, c):
+        if not (0 <= r < self.rows and 0 <= c < self.cols):
+            raise ValueError(f"Position ({r},{c}) is out of bounds.")
+        cell = self.cells[r][c]
+        if not cell.flagged:
+            raise ValueError("Cell is not flagged.")
+        cell.flagged = False
+        self.flags -= 1
+
+    def _reveal_all(self):
         for r in range(self.rows):
             for c in range(self.cols):
                 if self.cells[r][c].mine:
@@ -122,7 +140,7 @@ class Board:
                 cell = self.cells[r][c]
                 if not cell.mine and not cell.revealed:
                     return
-        self.state = State.WON
+        self.state = "won"
         self.end_time = time.time()
 
     def elapsed(self):
@@ -135,366 +153,194 @@ class Board:
         return self.total_mines - self.flags
 
 
-# ---------------------------------------------------------------------------
-# Difficulty presets
-# ---------------------------------------------------------------------------
+NUM_COLORS = {
+    1: "\033[94m",  # blue
+    2: "\033[92m",  # green
+    3: "\033[91m",  # red
+    4: "\033[34m",  # dark blue
+    5: "\033[31m",  # dark red
+    6: "\033[96m",  # cyan
+    7: "\033[95m",  # magenta
+    8: "\033[90m",  # grey
+}
+RESET = "\033[0m"
+BOLD = "\033[1m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+GREEN = "\033[92m"
+DIM = "\033[2m"
 
-DIFFICULTIES = [
-    ("Beginner",     9,  9,  10),
-    ("Intermediate", 16, 16, 40),
-    ("Expert",       16, 30, 99),
-]
 
-# ---------------------------------------------------------------------------
-# Colours & sizing
-# ---------------------------------------------------------------------------
+def cell_str(cell):
+    if cell.revealed:
+        if cell.mine:
+            return f"{RED}{BOLD}*{RESET}"
+        elif cell.adjacent > 0:
+            color = NUM_COLORS.get(cell.adjacent, "")
+            return f"{color}{cell.adjacent}{RESET}"
+        else:
+            return " "
+    elif cell.flagged:
+        return f"{YELLOW}{BOLD}F{RESET}"
+    else:
+        return f"{DIM}.{RESET}"
 
-BG          = (30,  30,  35)
-HEADER_BG   = (20,  20,  25)
-CELL_HIDDEN = (70,  75,  90)
-CELL_REVEAL = (45,  48,  58)
-CELL_BORDER = (100, 105, 120)
-CELL_HOVER  = (90,  95, 115)
-MINE_COL    = (220,  60,  60)
-FLAG_COL    = (240, 180,  40)
-WIN_COL     = (80,  200, 120)
-LOSE_COL    = (220,  60,  60)
-BTN_NORMAL  = (60,  65,  80)
-BTN_HOVER   = (80,  85, 105)
-BTN_ACTIVE  = (50,  55,  70)
-TEXT_MAIN   = (220, 222, 230)
-TEXT_DIM    = (130, 135, 155)
 
-# Number colours matching classic Minesweeper
-NUMBER_COLORS = {
-    1: (80,  120, 220),
-    2: (80,  180,  80),
-    3: (220,  70,  70),
-    4: (60,   60, 160),
-    5: (160,  40,  40),
-    6: (60,  160, 160),
-    7: (160,  60, 160),
-    8: (130, 130, 130),
+def clear():
+    os.system("clear" if os.name != "nt" else "cls")
+
+
+def draw(board):
+    clear()
+    # Header
+    status = ""
+    if board.state == "won":
+        status = f"  {GREEN}{BOLD}*** YOU WIN! ***{RESET}"
+    elif board.state == "lost":
+        status = f"  {RED}{BOLD}*** GAME OVER ***{RESET}"
+    print(
+        f"  Mines remaining: {BOLD}{board.mines_remaining():3d}{RESET}"
+        f"  Time: {BOLD}{board.elapsed():4d}s{RESET}"
+        f"{status}"
+    )
+    print()
+
+    # Column headers
+    col_w = 2
+    indent = "    "
+    col_nums = "".join(f"{c:<{col_w}}" for c in range(board.cols))
+    print(f"{indent}  {DIM}{col_nums}{RESET}")
+    sep = "  " + "-" * (board.cols * col_w + 1)
+    print(f"{indent}{sep}")
+
+    for r in range(board.rows):
+        row_str = " ".join(cell_str(board.cells[r][c]) for c in range(board.cols))
+        print(f"{indent}{r:2d}| {row_str}")
+
+    print()
+
+
+HELP = """\
+Commands:
+  r <row> <col>   Reveal a cell            e.g.  r 3 5
+  f <row> <col>   Flag a cell              e.g.  f 3 5
+  u <row> <col>   Unflag a cell            e.g.  u 3 5
+  c <row> <col>   Chord (auto-reveal)      e.g.  c 3 5
+  n               New game
+  h               Show this help
+  q               Quit
+"""
+
+
+def parse_cmd(line):
+    parts = line.strip().lower().split()
+    if not parts:
+        return None, None, None
+    cmd = parts[0]
+    if cmd in ("n", "h", "q"):
+        return cmd, None, None
+    if cmd in ("r", "f", "u", "c"):
+        if len(parts) != 3:
+            raise ValueError(f"'{cmd}' needs row and col, e.g.: {cmd} 3 5")
+        r, c = int(parts[1]), int(parts[2])
+        return cmd, r, c
+    raise ValueError(f"Unknown command '{cmd}'. Type 'h' for help.")
+
+
+DIFFICULTIES = {
+    "b": ("Beginner",     9,  9,  10),
+    "i": ("Intermediate", 16, 16, 40),
+    "e": ("Expert",       16, 30, 99),
 }
 
-CELL_SIZE   = 36
-HEADER_H    = 64
-PADDING     = 16
-BTN_H       = 36
-BTN_W       = 140
-BTN_RADIUS  = 8
-CELL_RADIUS = 4
+
+def select_difficulty():
+    clear()
+    print(f"\n  {BOLD}MINESWEEPER{RESET}\n")
+    print("  Select difficulty:")
+    print("    [b] Beginner     (9x9,   10 mines)")
+    print("    [i] Intermediate (16x16, 40 mines)")
+    print("    [e] Expert       (16x30, 99 mines)")
+    print()
+    while True:
+        try:
+            choice = input("  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return None
+        if choice in DIFFICULTIES:
+            return DIFFICULTIES[choice]
+        if choice in ("q", "quit"):
+            return None
+        print("  Please enter b, i, or e.")
 
 
-# ---------------------------------------------------------------------------
-# Pygame renderer
-# ---------------------------------------------------------------------------
+def play(rows, cols, mines):
+    board = Board(rows, cols, mines)
+    draw(board)
+    print(HELP)
 
-class Game:
-    def __init__(self):
-        pygame.init()
-        pygame.display.set_caption("Minesweeper")
+    while True:
+        if board.state != "playing":
+            try:
+                again = input("  Play again? [y/n] > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            return again.startswith("y")
 
-        self.screen = None
-        self.font_num   = None
-        self.font_ui    = None
-        self.font_title = None
-        self.font_small = None
+        try:
+            line = input("  > ")
+        except (EOFError, KeyboardInterrupt):
+            return False
 
-        self.board  = None
-        self.diff_idx = 0       # selected difficulty index on menu
-        self.scene  = "menu"    # "menu" | "game"
-        self.hover_cell  = None
-        self.hover_btn   = None
+        try:
+            cmd, r, c = parse_cmd(line)
+        except ValueError as e:
+            print(f"  {RED}Error:{RESET} {e}")
+            continue
 
-        self._init_display(DIFFICULTIES[0])
+        if cmd is None:
+            continue
+        if cmd == "q":
+            return False
+        if cmd == "n":
+            return True
+        if cmd == "h":
+            print(HELP)
+            continue
 
-    # ------------------------------------------------------------------
-    def _init_display(self, difficulty):
-        _, rows, cols, _ = difficulty
-        w = max(cols * CELL_SIZE + PADDING * 2, 420)
-        h = rows * CELL_SIZE + HEADER_H + PADDING * 2
-        self.screen = pygame.display.set_mode((w, h))
-        self.font_num   = pygame.font.SysFont("Arial", 18, bold=True)
-        self.font_ui    = pygame.font.SysFont("Arial", 16)
-        self.font_title = pygame.font.SysFont("Arial", 28, bold=True)
-        self.font_small = pygame.font.SysFont("Arial", 13)
+        try:
+            if cmd == "r":
+                board.reveal(r, c)
+            elif cmd == "f":
+                board.flag(r, c)
+            elif cmd == "u":
+                board.unflag(r, c)
+            elif cmd == "c":
+                board.chord(r, c)
+        except (ValueError, RecursionError) as e:
+            print(f"  {RED}Error:{RESET} {e}")
+            continue
 
-    def _start_game(self, diff_idx):
-        self.diff_idx = diff_idx
-        name, rows, cols, mines = DIFFICULTIES[diff_idx]
-        self._init_display(DIFFICULTIES[diff_idx])
-        self.board = Board(rows, cols, mines)
-        self.scene = "game"
-        self.hover_cell = None
-
-    # ------------------------------------------------------------------
-    # Coordinate helpers
-    # ------------------------------------------------------------------
-
-    def _board_origin(self):
-        cols = self.board.cols
-        w = self.screen.get_width()
-        ox = (w - cols * CELL_SIZE) // 2
-        oy = HEADER_H
-        return ox, oy
-
-    def _cell_at(self, mx, my):
-        ox, oy = self._board_origin()
-        c = (mx - ox) // CELL_SIZE
-        r = (my - oy) // CELL_SIZE
-        if 0 <= r < self.board.rows and 0 <= c < self.board.cols:
-            return r, c
-        return None
-
-    def _cell_rect(self, r, c):
-        ox, oy = self._board_origin()
-        return pygame.Rect(ox + c * CELL_SIZE, oy + r * CELL_SIZE, CELL_SIZE, CELL_SIZE)
-
-    # ------------------------------------------------------------------
-    # Drawing helpers
-    # ------------------------------------------------------------------
-
-    def _draw_round_rect(self, surf, color, rect, radius, border=0, border_color=None):
-        pygame.draw.rect(surf, color, rect, border_radius=radius)
-        if border and border_color:
-            pygame.draw.rect(surf, border_color, rect, border, border_radius=radius)
-
-    def _draw_button(self, label, rect, hover):
-        color = BTN_HOVER if hover else BTN_NORMAL
-        self._draw_round_rect(self.screen, color, rect, BTN_RADIUS)
-        txt = self.font_ui.render(label, True, TEXT_MAIN)
-        self.screen.blit(txt, txt.get_rect(center=rect.center))
-
-    # ------------------------------------------------------------------
-    # Menu scene
-    # ------------------------------------------------------------------
-
-    def _draw_menu(self):
-        w, h = self.screen.get_size()
-        self.screen.fill(BG)
-
-        title = self.font_title.render("💣  Minesweeper", True, TEXT_MAIN)
-        self.screen.blit(title, title.get_rect(center=(w // 2, 80)))
-
-        sub = self.font_ui.render("Select difficulty", True, TEXT_DIM)
-        self.screen.blit(sub, sub.get_rect(center=(w // 2, 120)))
-
-        self._menu_btn_rects = []
-        for i, (name, rows, cols, mines) in enumerate(DIFFICULTIES):
-            rect = pygame.Rect(0, 0, BTN_W + 60, BTN_H + 4)
-            rect.center = (w // 2, 165 + i * 56)
-            hover = (self.hover_btn == i)
-            color = BTN_HOVER if hover else BTN_NORMAL
-            if i == self.diff_idx:
-                color = (55, 100, 160)
-            self._draw_round_rect(self.screen, color, rect, BTN_RADIUS)
-            label = f"{name}  ({rows}×{cols}, {mines} mines)"
-            txt = self.font_ui.render(label, True, TEXT_MAIN)
-            self.screen.blit(txt, txt.get_rect(center=rect.center))
-            self._menu_btn_rects.append(rect)
-
-        # Play button
-        play_rect = pygame.Rect(0, 0, BTN_W, BTN_H + 4)
-        play_rect.center = (w // 2, 165 + len(DIFFICULTIES) * 56 + 10)
-        hover = (self.hover_btn == len(DIFFICULTIES))
-        self._draw_button("▶  Play", play_rect, hover)
-        self._menu_btn_rects.append(play_rect)
-
-        pygame.display.flip()
-
-    # ------------------------------------------------------------------
-    # Game scene
-    # ------------------------------------------------------------------
-
-    def _draw_header(self):
-        w = self.screen.get_width()
-        pygame.draw.rect(self.screen, HEADER_BG, (0, 0, w, HEADER_H))
-
-        # Mines remaining
-        mine_txt = self.font_title.render(f"💣 {self.board.mines_remaining():3d}", True, TEXT_MAIN)
-        self.screen.blit(mine_txt, (PADDING, HEADER_H // 2 - mine_txt.get_height() // 2))
-
-        # Timer
-        time_txt = self.font_title.render(f"⏱ {self.board.elapsed():4d}s", True, TEXT_MAIN)
-        self.screen.blit(time_txt, (w - time_txt.get_width() - PADDING,
-                                    HEADER_H // 2 - time_txt.get_height() // 2))
-
-        # Status / new game button
-        if self.board.state == State.WON:
-            label = "🎉 You Win!  New Game"
-            col = WIN_COL
-        elif self.board.state == State.LOST:
-            label = "💥 Game Over  New Game"
-            col = LOSE_COL
-        else:
-            label = "☰ Menu"
-            col = TEXT_DIM
-
-        btn_w = 180
-        self._menu_game_btn = pygame.Rect(w // 2 - btn_w // 2,
-                                          HEADER_H // 2 - BTN_H // 2,
-                                          btn_w, BTN_H)
-        hover = (self.hover_btn == "menu")
-        bg = BTN_HOVER if hover else BTN_NORMAL
-        self._draw_round_rect(self.screen, bg, self._menu_game_btn, BTN_RADIUS)
-        txt = self.font_ui.render(label, True, col)
-        self.screen.blit(txt, txt.get_rect(center=self._menu_game_btn.center))
-
-    def _draw_cells(self):
-        for r in range(self.board.rows):
-            for c in range(self.board.cols):
-                cell = self.board.cells[r][c]
-                rect = self._cell_rect(r, c)
-                inner = rect.inflate(-3, -3)
-                is_hover = (self.hover_cell == (r, c))
-
-                if cell.revealed:
-                    if cell.mine:
-                        self._draw_round_rect(self.screen, MINE_COL, inner, CELL_RADIUS)
-                        t = self.font_num.render("*", True, (255, 255, 255))
-                        self.screen.blit(t, t.get_rect(center=inner.center))
-                    elif cell.adjacent > 0:
-                        self._draw_round_rect(self.screen, CELL_REVEAL, inner, CELL_RADIUS)
-                        col = NUMBER_COLORS.get(cell.adjacent, TEXT_MAIN)
-                        t = self.font_num.render(str(cell.adjacent), True, col)
-                        self.screen.blit(t, t.get_rect(center=inner.center))
-                    else:
-                        self._draw_round_rect(self.screen, CELL_REVEAL, inner, CELL_RADIUS)
-                elif cell.flagged:
-                    bg = CELL_HOVER if is_hover else CELL_HIDDEN
-                    self._draw_round_rect(self.screen, bg, inner, CELL_RADIUS,
-                                          border=1, border_color=CELL_BORDER)
-                    t = self.font_num.render("🚩", True, FLAG_COL)
-                    self.screen.blit(t, t.get_rect(center=inner.center))
-                else:
-                    bg = CELL_HOVER if is_hover else CELL_HIDDEN
-                    self._draw_round_rect(self.screen, bg, inner, CELL_RADIUS,
-                                          border=1, border_color=CELL_BORDER)
-
-    def _draw_game(self):
-        self.screen.fill(BG)
-        self._draw_header()
-        self._draw_cells()
-
-        # Controls hint at bottom
-        hint = "Left click: reveal   Right click: flag   Middle / chord: auto-reveal"
-        t = self.font_small.render(hint, True, TEXT_DIM)
-        w, h = self.screen.get_size()
-        self.screen.blit(t, t.get_rect(center=(w // 2, h - 10)))
-
-        pygame.display.flip()
-
-    # ------------------------------------------------------------------
-    # Event handling
-    # ------------------------------------------------------------------
-
-    def _handle_menu_event(self, event):
-        if event.type == pygame.MOUSEMOTION:
-            mx, my = event.pos
-            self.hover_btn = None
-            for i, rect in enumerate(self._menu_btn_rects):
-                if rect.collidepoint(mx, my):
-                    self.hover_btn = i
-                    break
-
-        elif event.type == pygame.MOUSEBUTTONUP and event.button == 1:
-            mx, my = event.pos
-            for i, rect in enumerate(self._menu_btn_rects):
-                if rect.collidepoint(mx, my):
-                    if i < len(DIFFICULTIES):
-                        self.diff_idx = i
-                    else:
-                        # Play button
-                        self._start_game(self.diff_idx)
-                    break
-
-        elif event.type == pygame.KEYDOWN:
-            if event.key in (pygame.K_1, pygame.K_b):
-                self.diff_idx = 0
-            elif event.key in (pygame.K_2, pygame.K_i):
-                self.diff_idx = 1
-            elif event.key in (pygame.K_3, pygame.K_e):
-                self.diff_idx = 2
-            elif event.key in (pygame.K_RETURN, pygame.K_SPACE):
-                self._start_game(self.diff_idx)
-
-    def _handle_game_event(self, event):
-        if event.type == pygame.MOUSEMOTION:
-            mx, my = event.pos
-            self.hover_cell = self._cell_at(mx, my)
-            self.hover_btn = "menu" if self._menu_game_btn.collidepoint(mx, my) else None
-
-        elif event.type == pygame.MOUSEBUTTONUP:
-            mx, my = event.pos
-
-            # Header button
-            if self._menu_game_btn.collidepoint(mx, my):
-                if self.board.state != State.PLAYING:
-                    self._start_game(self.diff_idx)
-                else:
-                    self.scene = "menu"
-                return
-
-            rc = self._cell_at(mx, my)
-            if rc is None or self.board.state != State.PLAYING:
-                return
-            r, c = rc
-
-            if event.button == 1:
-                self.board.reveal(r, c)
-            elif event.button == 3:
-                self.board.toggle_flag(r, c)
-            elif event.button == 2:
-                self.board.chord(r, c)
-
-        elif event.type == pygame.KEYDOWN:
-            if event.key == pygame.K_ESCAPE:
-                self.scene = "menu"
-            elif event.key == pygame.K_n:
-                self._start_game(self.diff_idx)
-
-    # ------------------------------------------------------------------
-    # Main loop (Pygbag-compatible async)
-    # ------------------------------------------------------------------
-
-    async def run(self):
-        import asyncio
-        clock = pygame.time.Clock()
-        # Draw menu first so it's visible before any events
-        self._menu_btn_rects = []
-        self._menu_game_btn = pygame.Rect(0, 0, 0, 0)
-
-        running = True
-        while running:
-            for event in pygame.event.get():
-                if event.type == pygame.QUIT:
-                    running = False
-                    break
-                if self.scene == "menu":
-                    self._handle_menu_event(event)
-                else:
-                    self._handle_game_event(event)
-
-            if self.scene == "menu":
-                self._draw_menu()
-            else:
-                self._draw_game()
-
-            clock.tick(30)
-            await asyncio.sleep(0)  # yield to browser event loop (Pygbag requirement)
-
-        pygame.quit()
+        draw(board)
+        if board.state == "lost":
+            print(f"  {RED}{BOLD}BOOM! You hit a mine.{RESET}\n")
+        elif board.state == "won":
+            print(
+                f"  {GREEN}{BOLD}Congratulations! Cleared in {board.elapsed()}s.{RESET}\n"
+            )
 
 
-# ---------------------------------------------------------------------------
-# Entry point
-# ---------------------------------------------------------------------------
+def main():
+    while True:
+        result = select_difficulty()
+        if result is None:
+            break
+        name, rows, cols, mines = result
+        replay = play(rows, cols, mines)
+        if not replay:
+            break
+    print("\n  Thanks for playing!\n")
 
-import asyncio
 
-async def main():
-    game = Game()
-    await game.run()
-
-asyncio.run(main())
+if __name__ == "__main__":
+    main()
