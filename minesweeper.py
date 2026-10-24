@@ -1,15 +1,9 @@
-"""Minesweeper — terminal game using curses."""
+"""Minesweeper — text-based terminal game."""
 
-import curses
 import random
 import time
-from enum import Enum
-
-
-class State(Enum):
-    PLAYING = "playing"
-    WON = "won"
-    LOST = "lost"
+import os
+import sys
 
 
 class Cell:
@@ -21,23 +15,12 @@ class Cell:
 
 
 class Board:
-    COLORS = {
-        1: curses.COLOR_BLUE,
-        2: curses.COLOR_GREEN,
-        3: curses.COLOR_RED,
-        4: curses.COLOR_MAGENTA,
-        5: curses.COLOR_RED,
-        6: curses.COLOR_CYAN,
-        7: curses.COLOR_MAGENTA,
-        8: curses.COLOR_WHITE,
-    }
-
     def __init__(self, rows, cols, mines):
         self.rows = rows
         self.cols = cols
         self.total_mines = mines
         self.cells = [[Cell() for _ in range(cols)] for _ in range(rows)]
-        self.state = State.PLAYING
+        self.state = "playing"  # playing / won / lost
         self.start_time = None
         self.end_time = None
         self.first_move = True
@@ -66,58 +49,86 @@ class Board:
             for c in range(self.cols):
                 if not self.cells[r][c].mine:
                     self.cells[r][c].adjacent = sum(
-                        1 for nr, nc in self._neighbors(r, c) if self.cells[nr][nc].mine
+                        1 for nr, nc in self._neighbors(r, c)
+                        if self.cells[nr][nc].mine
                     )
 
     def reveal(self, r, c):
+        if not (0 <= r < self.rows and 0 <= c < self.cols):
+            raise ValueError(f"Position ({r},{c}) is out of bounds.")
         if self.first_move:
             self.first_move = False
             self.start_time = time.time()
             self._place_mines(r, c)
-
         cell = self.cells[r][c]
-        if cell.flagged or cell.revealed:
-            return
+        if cell.flagged:
+            raise ValueError("That cell is flagged. Unflag it first with 'u'.")
+        if cell.revealed:
+            raise ValueError("That cell is already revealed.")
         cell.revealed = True
-
         if cell.mine:
-            self.state = State.LOST
+            self.state = "lost"
             self.end_time = time.time()
-            self._reveal_all_mines()
+            self._reveal_all()
             return
-
         if cell.adjacent == 0:
             for nr, nc in self._neighbors(r, c):
-                if not self.cells[nr][nc].revealed and not self.cells[nr][nc].flagged:
+                nb = self.cells[nr][nc]
+                if not nb.revealed and not nb.flagged:
                     self.reveal(nr, nc)
-
         self._check_win()
 
     def chord(self, r, c):
-        """Reveal all unflagged neighbors when adjacent flag count matches."""
+        if not (0 <= r < self.rows and 0 <= c < self.cols):
+            raise ValueError(f"Position ({r},{c}) is out of bounds.")
         cell = self.cells[r][c]
-        if not cell.revealed or cell.adjacent == 0:
-            return
-        flag_count = sum(1 for nr, nc in self._neighbors(r, c) if self.cells[nr][nc].flagged)
-        if flag_count == cell.adjacent:
-            for nr, nc in self._neighbors(r, c):
-                if not self.cells[nr][nc].flagged and not self.cells[nr][nc].revealed:
+        if not cell.revealed:
+            raise ValueError("Cell is not revealed yet.")
+        if cell.adjacent == 0:
+            raise ValueError("No adjacent mines — nothing to chord.")
+        flag_count = sum(
+            1 for nr, nc in self._neighbors(r, c) if self.cells[nr][nc].flagged
+        )
+        if flag_count != cell.adjacent:
+            raise ValueError(
+                f"Need {cell.adjacent} flag(s) around this cell, found {flag_count}."
+            )
+        for nr, nc in self._neighbors(r, c):
+            nb = self.cells[nr][nc]
+            if not nb.flagged and not nb.revealed:
+                nb.revealed = True
+                if nb.mine:
+                    self.state = "lost"
+                    self.end_time = time.time()
+                    self._reveal_all()
+                    return
+                if nb.adjacent == 0:
                     self.reveal(nr, nc)
-                    if self.state != State.PLAYING:
-                        return
+                if self.state != "playing":
+                    return
+        self._check_win()
 
-    def toggle_flag(self, r, c):
+    def flag(self, r, c):
+        if not (0 <= r < self.rows and 0 <= c < self.cols):
+            raise ValueError(f"Position ({r},{c}) is out of bounds.")
         cell = self.cells[r][c]
         if cell.revealed:
-            return
+            raise ValueError("Cell is already revealed.")
         if cell.flagged:
-            cell.flagged = False
-            self.flags -= 1
-        else:
-            cell.flagged = True
-            self.flags += 1
+            raise ValueError("Already flagged. Use 'u' to unflag.")
+        cell.flagged = True
+        self.flags += 1
 
-    def _reveal_all_mines(self):
+    def unflag(self, r, c):
+        if not (0 <= r < self.rows and 0 <= c < self.cols):
+            raise ValueError(f"Position ({r},{c}) is out of bounds.")
+        cell = self.cells[r][c]
+        if not cell.flagged:
+            raise ValueError("Cell is not flagged.")
+        cell.flagged = False
+        self.flags -= 1
+
+    def _reveal_all(self):
         for r in range(self.rows):
             for c in range(self.cols):
                 if self.cells[r][c].mine:
@@ -129,7 +140,7 @@ class Board:
                 cell = self.cells[r][c]
                 if not cell.mine and not cell.revealed:
                     return
-        self.state = State.WON
+        self.state = "won"
         self.end_time = time.time()
 
     def elapsed(self):
@@ -142,191 +153,194 @@ class Board:
         return self.total_mines - self.flags
 
 
+NUM_COLORS = {
+    1: "\033[94m",  # blue
+    2: "\033[92m",  # green
+    3: "\033[91m",  # red
+    4: "\033[34m",  # dark blue
+    5: "\033[31m",  # dark red
+    6: "\033[96m",  # cyan
+    7: "\033[95m",  # magenta
+    8: "\033[90m",  # grey
+}
+RESET = "\033[0m"
+BOLD = "\033[1m"
+RED = "\033[91m"
+YELLOW = "\033[93m"
+GREEN = "\033[92m"
+DIM = "\033[2m"
+
+
+def cell_str(cell):
+    if cell.revealed:
+        if cell.mine:
+            return f"{RED}{BOLD}*{RESET}"
+        elif cell.adjacent > 0:
+            color = NUM_COLORS.get(cell.adjacent, "")
+            return f"{color}{cell.adjacent}{RESET}"
+        else:
+            return " "
+    elif cell.flagged:
+        return f"{YELLOW}{BOLD}F{RESET}"
+    else:
+        return f"{DIM}.{RESET}"
+
+
+def clear():
+    os.system("clear" if os.name != "nt" else "cls")
+
+
+def draw(board):
+    clear()
+    # Header
+    status = ""
+    if board.state == "won":
+        status = f"  {GREEN}{BOLD}*** YOU WIN! ***{RESET}"
+    elif board.state == "lost":
+        status = f"  {RED}{BOLD}*** GAME OVER ***{RESET}"
+    print(
+        f"  Mines remaining: {BOLD}{board.mines_remaining():3d}{RESET}"
+        f"  Time: {BOLD}{board.elapsed():4d}s{RESET}"
+        f"{status}"
+    )
+    print()
+
+    # Column headers
+    col_w = 2
+    indent = "    "
+    col_nums = "".join(f"{c:<{col_w}}" for c in range(board.cols))
+    print(f"{indent}  {DIM}{col_nums}{RESET}")
+    sep = "  " + "-" * (board.cols * col_w + 1)
+    print(f"{indent}{sep}")
+
+    for r in range(board.rows):
+        row_str = " ".join(cell_str(board.cells[r][c]) for c in range(board.cols))
+        print(f"{indent}{r:2d}| {row_str}")
+
+    print()
+
+
+HELP = """\
+Commands:
+  r <row> <col>   Reveal a cell            e.g.  r 3 5
+  f <row> <col>   Flag a cell              e.g.  f 3 5
+  u <row> <col>   Unflag a cell            e.g.  u 3 5
+  c <row> <col>   Chord (auto-reveal)      e.g.  c 3 5
+  n               New game
+  h               Show this help
+  q               Quit
+"""
+
+
+def parse_cmd(line):
+    parts = line.strip().lower().split()
+    if not parts:
+        return None, None, None
+    cmd = parts[0]
+    if cmd in ("n", "h", "q"):
+        return cmd, None, None
+    if cmd in ("r", "f", "u", "c"):
+        if len(parts) != 3:
+            raise ValueError(f"'{cmd}' needs row and col, e.g.: {cmd} 3 5")
+        r, c = int(parts[1]), int(parts[2])
+        return cmd, r, c
+    raise ValueError(f"Unknown command '{cmd}'. Type 'h' for help.")
+
+
 DIFFICULTIES = {
-    "b": ("Beginner", 9, 9, 10),
+    "b": ("Beginner",     9,  9,  10),
     "i": ("Intermediate", 16, 16, 40),
-    "e": ("Expert", 16, 30, 99),
+    "e": ("Expert",       16, 30, 99),
 }
 
-CELL_WIDTH = 3  # chars per cell
 
-
-def init_colors():
-    curses.start_color()
-    curses.use_default_colors()
-    curses.init_pair(1, curses.COLOR_BLUE, -1)
-    curses.init_pair(2, curses.COLOR_GREEN, -1)
-    curses.init_pair(3, curses.COLOR_RED, -1)
-    curses.init_pair(4, curses.COLOR_MAGENTA, -1)
-    curses.init_pair(5, curses.COLOR_RED, -1)
-    curses.init_pair(6, curses.COLOR_CYAN, -1)
-    curses.init_pair(7, curses.COLOR_YELLOW, -1)
-    curses.init_pair(8, curses.COLOR_WHITE, -1)
-    curses.init_pair(9, curses.COLOR_RED, -1)    # mine
-    curses.init_pair(10, curses.COLOR_YELLOW, -1) # flag
-    curses.init_pair(11, curses.COLOR_WHITE, -1)  # unrevealed
-    curses.init_pair(12, curses.COLOR_BLACK, -1)  # revealed empty
-    curses.init_pair(13, curses.COLOR_GREEN, -1)  # status bar win
-    curses.init_pair(14, curses.COLOR_RED, -1)    # status bar lose
-
-
-def draw_board(stdscr, board, cursor_r, cursor_c, offset_r, offset_c):
-    stdscr.erase()
-    height, width = stdscr.getmaxyx()
-
-    # Header
-    mines_str = f" Mines: {board.mines_remaining():3d} "
-    time_str = f" Time: {board.elapsed():4d}s "
-    if board.state == State.WON:
-        status = " *** YOU WIN! *** "
-        attr = curses.color_pair(13) | curses.A_BOLD
-    elif board.state == State.LOST:
-        status = " *** GAME OVER *** "
-        attr = curses.color_pair(14) | curses.A_BOLD
-    else:
-        status = ""
-        attr = curses.A_NORMAL
-
-    header = mines_str + status + time_str
-    try:
-        stdscr.addstr(0, 0, header[:width - 1], attr)
-    except curses.error:
-        pass
-
-    # Grid
-    for r in range(board.rows):
-        for c in range(board.cols):
-            cell = board.cells[r][c]
-            screen_r = offset_r + r
-            screen_c = offset_c + c * CELL_WIDTH
-
-            if screen_r < 1 or screen_r >= height - 2:
-                continue
-            if screen_c < 0 or screen_c + CELL_WIDTH > width:
-                continue
-
-            is_cursor = (r == cursor_r and c == cursor_c)
-
-            if cell.revealed:
-                if cell.mine:
-                    ch = " * "
-                    pair = curses.color_pair(9) | curses.A_BOLD
-                elif cell.adjacent > 0:
-                    ch = f" {cell.adjacent} "
-                    pair = curses.color_pair(cell.adjacent)
-                else:
-                    ch = "   "
-                    pair = curses.color_pair(12)
-            elif cell.flagged:
-                ch = " F "
-                pair = curses.color_pair(10) | curses.A_BOLD
-            else:
-                ch = " . "
-                pair = curses.color_pair(11)
-
-            if is_cursor:
-                pair = pair | curses.A_REVERSE
-
-            try:
-                stdscr.addstr(screen_r, screen_c, ch, pair)
-            except curses.error:
-                pass
-
-    # Footer
-    footer = " Arrow/HJKL:move  Space:reveal  F:flag  Enter:chord  N:new  Q:quit "
-    try:
-        stdscr.addstr(height - 1, 0, footer[:width - 1], curses.A_DIM)
-    except curses.error:
-        pass
-
-    stdscr.refresh()
-
-
-def select_difficulty(stdscr):
-    stdscr.clear()
-    lines = [
-        "  MINESWEEPER",
-        "",
-        "  Select difficulty:",
-        "    [B] Beginner     (9x9,   10 mines)",
-        "    [I] Intermediate (16x16, 40 mines)",
-        "    [E] Expert       (16x30, 99 mines)",
-        "",
-        "  Press B, I, or E",
-    ]
-    for i, line in enumerate(lines):
+def select_difficulty():
+    clear()
+    print(f"\n  {BOLD}MINESWEEPER{RESET}\n")
+    print("  Select difficulty:")
+    print("    [b] Beginner     (9x9,   10 mines)")
+    print("    [i] Intermediate (16x16, 40 mines)")
+    print("    [e] Expert       (16x30, 99 mines)")
+    print()
+    while True:
         try:
-            stdscr.addstr(i + 2, 0, line)
-        except curses.error:
-            pass
-    stdscr.refresh()
-
-    while True:
-        key = stdscr.getch()
-        ch = chr(key).lower() if 0 <= key < 256 else ""
-        if ch in DIFFICULTIES:
-            return DIFFICULTIES[ch]
-        if key in (ord("q"), ord("Q"), 27):
+            choice = input("  > ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
             return None
+        if choice in DIFFICULTIES:
+            return DIFFICULTIES[choice]
+        if choice in ("q", "quit"):
+            return None
+        print("  Please enter b, i, or e.")
 
 
-def game_loop(stdscr, rows, cols, mines):
-    curses.curs_set(0)
+def play(rows, cols, mines):
     board = Board(rows, cols, mines)
-    cursor_r, cursor_c = 0, 0
-
-    height, width = stdscr.getmaxyx()
-    offset_r = 1
-    offset_c = max(0, (width - cols * CELL_WIDTH) // 2)
+    draw(board)
+    print(HELP)
 
     while True:
-        draw_board(stdscr, board, cursor_r, cursor_c, offset_r, offset_c)
-        key = stdscr.getch()
+        if board.state != "playing":
+            try:
+                again = input("  Play again? [y/n] > ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                return False
+            return again.startswith("y")
 
-        if key in (ord("q"), ord("Q")):
+        try:
+            line = input("  > ")
+        except (EOFError, KeyboardInterrupt):
             return False
 
-        if key in (ord("n"), ord("N")):
-            return True
-
-        if board.state != State.PLAYING:
+        try:
+            cmd, r, c = parse_cmd(line)
+        except ValueError as e:
+            print(f"  {RED}Error:{RESET} {e}")
             continue
 
-        # Movement
-        if key in (curses.KEY_UP, ord("k"), ord("K")):
-            cursor_r = max(0, cursor_r - 1)
-        elif key in (curses.KEY_DOWN, ord("j"), ord("J")):
-            cursor_r = min(rows - 1, cursor_r + 1)
-        elif key in (curses.KEY_LEFT, ord("h"), ord("H")):
-            cursor_c = max(0, cursor_c - 1)
-        elif key in (curses.KEY_RIGHT, ord("l"), ord("L")):
-            cursor_c = min(cols - 1, cursor_c + 1)
+        if cmd is None:
+            continue
+        if cmd == "q":
+            return False
+        if cmd == "n":
+            return True
+        if cmd == "h":
+            print(HELP)
+            continue
 
-        # Actions
-        elif key in (ord(" "), ord("\n"), curses.KEY_ENTER):
-            if key in (ord("\n"), curses.KEY_ENTER, 10, 13):
-                board.chord(cursor_r, cursor_c)
-            else:
-                board.reveal(cursor_r, cursor_c)
-        elif key in (ord("f"), ord("F")):
-            board.toggle_flag(cursor_r, cursor_c)
+        try:
+            if cmd == "r":
+                board.reveal(r, c)
+            elif cmd == "f":
+                board.flag(r, c)
+            elif cmd == "u":
+                board.unflag(r, c)
+            elif cmd == "c":
+                board.chord(r, c)
+        except (ValueError, RecursionError) as e:
+            print(f"  {RED}Error:{RESET} {e}")
+            continue
 
-    return False
+        draw(board)
+        if board.state == "lost":
+            print(f"  {RED}{BOLD}BOOM! You hit a mine.{RESET}\n")
+        elif board.state == "won":
+            print(
+                f"  {GREEN}{BOLD}Congratulations! Cleared in {board.elapsed()}s.{RESET}\n"
+            )
 
 
-def main(stdscr):
-    init_colors()
-    curses.curs_set(0)
-
+def main():
     while True:
-        result = select_difficulty(stdscr)
+        result = select_difficulty()
         if result is None:
             break
         name, rows, cols, mines = result
-        replay = game_loop(stdscr, rows, cols, mines)
+        replay = play(rows, cols, mines)
         if not replay:
             break
+    print("\n  Thanks for playing!\n")
 
 
 if __name__ == "__main__":
-    curses.wrapper(main)
+    main()
